@@ -20,4 +20,10 @@ export type AIResult = {
   overallPass: boolean;
   confidence: number;
   landmarks?: Record<string, { x: number; y: number }>;
+  thresholds?: {
+    symmetryMaxDeviationPct: number;
+    coccyxMinCm: number;
+    coccyxMaxCm: number;
+    trochanterMaxMm: number;
+  };
 };

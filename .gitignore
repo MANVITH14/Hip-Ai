@@ -29,3 +29,8 @@ backend/.env
 backend/uploads/
 ai-service/.venv/
 ai-service/__pycache__/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/tailwind.config.js
+frontend/tailwind.config.d.ts

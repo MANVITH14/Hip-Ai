@@ -48,6 +48,31 @@ export function DashboardPage(): JSX.Element {
     return result.overallPass ? "status-pass border-success/50" : "status-fail border-danger/50";
   }, [result]);
 
+  const ruleChecks = useMemo(() => {
+    if (!result) return [];
+    const th = result.thresholds;
+    return [
+      {
+        label: "Obturator foramen symmetry",
+        value: `${result.symmetryScore.toFixed(2)}%`,
+        rule: `<= ${th?.symmetryMaxDeviationPct ?? 10}%`,
+        pass: result.symmetryPass
+      },
+      {
+        label: "Coccyx-pubic distance",
+        value: `${result.coccyxDistanceCm.toFixed(2)} cm`,
+        rule: `${th?.coccyxMinCm ?? 1}-${th?.coccyxMaxCm ?? 3} cm`,
+        pass: result.coccyxPass
+      },
+      {
+        label: "Lesser trochanter size",
+        value: `${result.trochanterSizeMm.toFixed(2)} mm`,
+        rule: `< ${th?.trochanterMaxMm ?? 5} mm`,
+        pass: result.trochanterPass
+      }
+    ];
+  }, [result]);
+
   const setNewPreview = (nextFile: File) => {
     if (imageUrl) URL.revokeObjectURL(imageUrl);
     setFile(nextFile);
@@ -278,6 +303,28 @@ export function DashboardPage(): JSX.Element {
                 pass={result?.confidence ? result.confidence >= 0.5 : undefined}
               />
             </div>
+
+            {result && (
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/65 p-3">
+                <p className="text-sm font-semibold text-slate-200">Clinical Rule Checks</p>
+                <div className="mt-2 space-y-2">
+                  {ruleChecks.map((item) => (
+                    <div key={item.label} className="flex items-center justify-between gap-3 text-sm">
+                      <div>
+                        <p className="text-slate-200">{item.label}</p>
+                        <p className="font-mono text-xs text-slate-400">Rule: {item.rule}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-mono text-slate-100">{item.value}</p>
+                        <p className={`font-mono text-xs ${item.pass ? "text-success" : "text-danger"}`}>
+                          {item.pass ? "PASS" : "FAIL"}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </motion.div>
 
           <motion.div
