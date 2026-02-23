@@ -1,0 +1,43 @@
+services:
+  # 1. AI Service (Python)
+  - type: web
+    name: hipalign-ai-service
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PORT
+        value: 8000
+    rootDir: ai-service
+
+  # 2. Backend (Node.js)
+  - type: web
+    name: hipalign-backend
+    env: node
+    buildCommand: "npm install && npm run build"
+    startCommand: "npx prisma generate && npx prisma migrate deploy && npm start"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hipalign-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: AI_SERVICE_URL
+        value: "https://hipalign-ai-service.onrender.com/analyze"
+    rootDir: backend
+
+  # 3. Frontend (Static Site / React)
+  - type: web
+    name: hipalign-frontend
+    env: node
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm run preview -- --host 0.0.0.0 --port $PORT"
+    rootDir: frontend
+
+databases:
+  # 4. PostgreSQL Database
+  - name: hipalign-db
+    databaseName: hipalign
+    user: hipalign_user
+    plan: free
