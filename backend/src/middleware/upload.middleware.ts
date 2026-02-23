@@ -9,7 +9,8 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-const allowedTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+const allowedTypes = new Set(["image/jpeg", "image/jpg", "image/png", "application/dicom"]);
+const allowedDicomExtensions = new Set([".dcm", ".dicom"]);
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadsDir),
@@ -24,8 +25,11 @@ export const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (!allowedTypes.has(file.mimetype)) {
-      cb(new AppError("Invalid file type. Allowed: jpg, jpeg, png, webp", 400));
+    const extension = path.extname(file.originalname).toLowerCase();
+    const isAllowedMime = allowedTypes.has(file.mimetype);
+    const isAllowedDicomByExt = allowedDicomExtensions.has(extension);
+    if (!isAllowedMime && !isAllowedDicomByExt) {
+      cb(new AppError("Invalid file type. Allowed: jpg, jpeg, png, dicom (.dcm)", 400));
       return;
     }
     cb(null, true);

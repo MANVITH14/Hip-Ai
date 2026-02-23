@@ -15,6 +15,24 @@ export type AIAnalyzeResponse = {
   overallPass: boolean;
   confidence: number;
   landmarks?: Record<string, { x: number; y: number }>;
+  measurements?: {
+    coccyxPubic?: {
+      distancePx: number;
+      distanceMm: number;
+      distanceCm: number;
+    };
+    trochanter?: {
+      distancePx: number;
+      distanceMm: number;
+      distanceCm: number;
+    };
+  };
+  calibration?: {
+    pixelToMm?: number;
+    rowSpacingMm?: number;
+    colSpacingMm?: number;
+    source?: "dicom" | "default";
+  };
 };
 
 export async function analyzeImageWithAI(imagePath: string): Promise<AIAnalyzeResponse> {

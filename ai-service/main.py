@@ -1,10 +1,13 @@
 import math
 import os
-from typing import Dict, Tuple
+from io import BytesIO
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
+import pydicom
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from pydicom.errors import InvalidDicomError
 
 app = FastAPI(title="HipAlign AI Service", version="1.0.0")
 
@@ -14,18 +17,22 @@ SYMMETRY_THRESHOLD_PCT = 10.0
 COCCYX_MIN_CM = 1.0
 COCCYX_MAX_CM = 3.0
 TROCHANTER_MAX_MM = 5.0
+ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
+ALLOWED_DICOM_CONTENT_TYPES = {"application/dicom", "application/dicom+json"}
+ALLOWED_DICOM_EXTENSIONS = {".dcm", ".dicom"}
 
 
-def calculate_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-    return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
-
-
-def pixels_to_mm(px: float) -> float:
-    return px * PIXEL_TO_MM
-
-
-def mm_to_cm(mm: float) -> float:
-    return mm / 10.0
+def calculate_distance_mm(
+    p1: Tuple[float, float], p2: Tuple[float, float], row_spacing_mm: float, col_spacing_mm: float
+) -> Tuple[float, float, float]:
+    dx_px = p2[0] - p1[0]
+    dy_px = p2[1] - p1[1]
+    rawPixelDistance = math.sqrt(dx_px**2 + dy_px**2)
+    dx_mm = dx_px * col_spacing_mm
+    dy_mm = dy_px * row_spacing_mm
+    distance_mm = math.sqrt(dx_mm**2 + dy_mm**2)
+    distance_cm = distance_mm / 10.0
+    return rawPixelDistance, distance_mm, distance_cm
 
 
 def check_symmetry(area_left: float, area_right: float) -> Tuple[float, bool]:
@@ -36,12 +43,9 @@ def check_symmetry(area_left: float, area_right: float) -> Tuple[float, bool]:
     return deviation_pct, deviation_pct <= SYMMETRY_THRESHOLD_PCT
 
 
-def cm_to_pixels(cm: float) -> float:
-    return (cm * 10.0) / PIXEL_TO_MM
-
-
-def mm_to_pixels(mm: float) -> float:
-    return mm / PIXEL_TO_MM
+def mm_to_pixels(mm: float, spacing_mm: float) -> float:
+    safe_spacing_mm = spacing_mm if spacing_mm > 0 else PIXEL_TO_MM
+    return mm / safe_spacing_mm
 
 
 def fit_vertical_segment(
@@ -92,10 +96,11 @@ def estimate_foramen_areas(image: np.ndarray) -> Tuple[float, float]:
     return area_left, area_right
 
 
-def detect_mock_landmarks(image: np.ndarray) -> Dict[str, Dict[str, float]]:
+def detect_mock_landmarks(image: np.ndarray, row_spacing_mm: float) -> Dict[str, Dict[str, float]]:
     h, w = image.shape[:2]
-    coccyx_target_px = cm_to_pixels(2.0)  # 2.0 cm target (inside 1-3 cm range)
-    trochanter_target_px = mm_to_pixels(4.0)  # 4.0 mm target (< 5 mm threshold)
+    spacing = row_spacing_mm if row_spacing_mm > 0 else PIXEL_TO_MM
+    coccyx_target_px = mm_to_pixels(20.0, spacing)  # 2.0 cm target (inside 1-3 cm range)
+    trochanter_target_px = mm_to_pixels(4.0, spacing)  # 4.0 mm target (< 5 mm threshold)
 
     coccyx_x = float(max(0.0, min(w - 1, w * 0.5)))
     coccyx_center_y = float(max(0.0, min(h - 1, h * 0.38)))
@@ -115,21 +120,87 @@ def detect_mock_landmarks(image: np.ndarray) -> Dict[str, Dict[str, float]]:
     }
 
 
-def evaluate_results(area_left: float, area_right: float, landmarks: Dict[str, Dict[str, float]]) -> Dict:
+def resolve_dicom_spacing(dataset) -> Tuple[float, float, str]:
+    pixel_spacing = getattr(dataset, "PixelSpacing", None)
+    if pixel_spacing and len(pixel_spacing) >= 2:
+        row_spacing = float(pixel_spacing[0])
+        col_spacing = float(pixel_spacing[1])
+        if row_spacing > 0 and col_spacing > 0:
+            return row_spacing, col_spacing, "dicom"
+    return PIXEL_TO_MM, PIXEL_TO_MM, "default"
+
+
+def normalize_to_uint8(image_array: np.ndarray, invert: bool = False) -> np.ndarray:
+    arr = image_array.astype(np.float32)
+    if invert:
+        arr = np.max(arr) - arr
+    min_val = float(np.min(arr))
+    max_val = float(np.max(arr))
+    if max_val <= min_val:
+        return np.zeros(arr.shape, dtype=np.uint8)
+    scaled = ((arr - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+    return scaled
+
+
+def decode_image_from_upload(
+    content: bytes, filename: Optional[str], content_type: Optional[str]
+) -> Tuple[np.ndarray, float, float, str]:
+    extension = ""
+    if filename and "." in filename:
+        extension = os.path.splitext(filename)[1].lower()
+
+    is_dicom = (content_type in ALLOWED_DICOM_CONTENT_TYPES) or (extension in ALLOWED_DICOM_EXTENSIONS)
+
+    if is_dicom:
+        try:
+            dataset = pydicom.dcmread(BytesIO(content), force=True)
+            pixel_array = dataset.pixel_array
+            invert = str(getattr(dataset, "PhotometricInterpretation", "")).upper() == "MONOCHROME1"
+            normalized = normalize_to_uint8(pixel_array, invert=invert)
+
+            if normalized.ndim == 2:
+                image = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+            elif normalized.ndim == 3 and normalized.shape[2] >= 3:
+                image = cv2.cvtColor(normalized[:, :, :3], cv2.COLOR_RGB2BGR)
+            else:
+                raise HTTPException(status_code=400, detail="Unsupported DICOM pixel format.")
+
+            row_spacing_mm, col_spacing_mm, source = resolve_dicom_spacing(dataset)
+            return image, row_spacing_mm, col_spacing_mm, source
+        except (InvalidDicomError, AttributeError, TypeError, ValueError, NotImplementedError):
+            raise HTTPException(status_code=400, detail="Invalid DICOM data.")
+
+    np_arr = np.frombuffer(content, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image data.")
+    return image, PIXEL_TO_MM, PIXEL_TO_MM, "default"
+
+
+def evaluate_results(
+    area_left: float,
+    area_right: float,
+    landmarks: Dict[str, Dict[str, float]],
+    row_spacing_mm: float,
+    col_spacing_mm: float,
+    spacing_source: str,
+) -> Dict:
     symmetry_deviation_pct, symmetry_pass = check_symmetry(area_left, area_right)
 
-    coccyx_px = calculate_distance(
+    coccyx_px, coccyx_mm, coccyx_cm = calculate_distance_mm(
         (landmarks["coccyx"]["x"], landmarks["coccyx"]["y"]),
         (landmarks["pubic_symphysis"]["x"], landmarks["pubic_symphysis"]["y"]),
+        row_spacing_mm,
+        col_spacing_mm,
     )
-    coccyx_cm = mm_to_cm(pixels_to_mm(coccyx_px))
     coccyx_pass = COCCYX_MIN_CM <= coccyx_cm <= COCCYX_MAX_CM
 
-    trochanter_px = calculate_distance(
+    trochanter_px, trochanter_mm, trochanter_cm = calculate_distance_mm(
         (landmarks["left_trochanter_start"]["x"], landmarks["left_trochanter_start"]["y"]),
         (landmarks["left_trochanter_end"]["x"], landmarks["left_trochanter_end"]["y"]),
+        row_spacing_mm,
+        col_spacing_mm,
     )
-    trochanter_mm = pixels_to_mm(trochanter_px)
     trochanter_pass = trochanter_mm < TROCHANTER_MAX_MM
 
     overall_pass = symmetry_pass and coccyx_pass and trochanter_pass
@@ -147,7 +218,24 @@ def evaluate_results(area_left: float, area_right: float, landmarks: Dict[str, D
         "overallPass": overall_pass,
         "confidence": round(confidence, 4),
         "landmarks": landmarks,
-        "calibration": {"pixelToMm": PIXEL_TO_MM},
+        "measurements": {
+            "coccyxPubic": {
+                "distancePx": round(coccyx_px, 4),
+                "distanceMm": round(coccyx_mm, 4),
+                "distanceCm": round(coccyx_cm, 4),
+            },
+            "trochanter": {
+                "distancePx": round(trochanter_px, 4),
+                "distanceMm": round(trochanter_mm, 4),
+                "distanceCm": round(trochanter_cm, 4),
+            },
+        },
+        "calibration": {
+            "pixelToMm": PIXEL_TO_MM,
+            "rowSpacingMm": round(row_spacing_mm, 6),
+            "colSpacingMm": round(col_spacing_mm, 6),
+            "source": spacing_source,
+        },
         "thresholds": {
             "symmetryMaxDeviationPct": SYMMETRY_THRESHOLD_PCT,
             "coccyxMinCm": COCCYX_MIN_CM,
@@ -164,24 +252,30 @@ def health():
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only image uploads are allowed.")
+    extension = os.path.splitext(file.filename or "")[1].lower()
+    is_allowed_image = file.content_type in ALLOWED_IMAGE_CONTENT_TYPES
+    is_allowed_dicom = (
+        file.content_type in ALLOWED_DICOM_CONTENT_TYPES or extension in ALLOWED_DICOM_EXTENSIONS
+    )
+    if not is_allowed_image and not is_allowed_dicom:
+        raise HTTPException(status_code=400, detail="Allowed file types: JPG, PNG, DICOM (.dcm).")
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=400, detail="Image exceeds 10MB size limit.")
 
-    np_arr = np.frombuffer(content, np.uint8)
-    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image data.")
+    image, row_spacing_mm, col_spacing_mm, spacing_source = decode_image_from_upload(
+        content, file.filename, file.content_type
+    )
 
-    landmarks = detect_mock_landmarks(image)
+    landmarks = detect_mock_landmarks(image, row_spacing_mm)
 
     area_left, area_right = estimate_foramen_areas(image)
 
     try:
-        result = evaluate_results(area_left, area_right, landmarks)
+        result = evaluate_results(
+            area_left, area_right, landmarks, row_spacing_mm, col_spacing_mm, spacing_source
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

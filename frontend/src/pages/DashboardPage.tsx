@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { XrayCanvas } from "../components/XrayCanvas";
@@ -15,8 +15,6 @@ const processingSteps = [
 
 export function DashboardPage(): JSX.Element {
   const navigate = useNavigate();
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [result, setResult] = useState<AIResult | null>(null);
@@ -24,14 +22,17 @@ export function DashboardPage(): JSX.Element {
   const [stepIdx, setStepIdx] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-  const [cameraOn, setCameraOn] = useState(false);
+  const [showDebugGrid, setShowDebugGrid] = useState(false);
+
+  const allowedMimeTypes = useMemo(
+    () => new Set(["image/jpeg", "image/jpg", "image/png", "application/dicom"]),
+    []
+  );
+  const allowedExtensions = useMemo(() => new Set([".jpg", ".jpeg", ".png", ".dcm", ".dicom"]), []);
 
   useEffect(() => {
     return () => {
       if (imageUrl) URL.revokeObjectURL(imageUrl);
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
     };
   }, [imageUrl]);
 
@@ -85,53 +86,18 @@ export function DashboardPage(): JSX.Element {
   const onPickFile = (event: ChangeEvent<HTMLInputElement>) => {
     const picked = event.target.files?.[0];
     if (!picked) return;
+    const extension = picked.name.slice(Math.max(0, picked.name.lastIndexOf("."))).toLowerCase();
+    const isAllowed = allowedMimeTypes.has(picked.type) || allowedExtensions.has(extension);
+    if (!isAllowed) {
+      setError("Invalid file type. Allowed: JPG, PNG, DICOM (.dcm)");
+      return;
+    }
     setNewPreview(picked);
-  };
-
-  const startCamera = async () => {
-    setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      streamRef.current = stream;
-      setCameraOn(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch {
-      setError("Could not access webcam.");
-    }
-  };
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setCameraOn(false);
-  };
-
-  const captureFrame = async () => {
-    if (!videoRef.current) return;
-    const video = videoRef.current;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0);
-
-    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png", 0.95));
-    if (!blob) return;
-    const capturedFile = new File([blob], `capture-${Date.now()}.png`, { type: "image/png" });
-    setNewPreview(capturedFile);
   };
 
   const runAnalysis = async () => {
     if (!file) {
-      setError("Select or capture an image first.");
+      setError("Select an image first.");
       return;
     }
 
@@ -191,44 +157,15 @@ export function DashboardPage(): JSX.Element {
       <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
         <section className="glass-panel rounded-2xl p-5">
           <h2 className="text-lg font-bold">Input</h2>
-          <p className="text-sm text-slate-300">Upload image or capture from webcam.</p>
+          <p className="text-sm text-slate-300">Upload JPG, PNG, or DICOM image.</p>
 
           <label className="mt-4 block text-sm font-medium text-slate-200">Upload X-ray</label>
           <input
             type="file"
-            accept="image/*"
+            accept=".jpg,.jpeg,.png,.dcm,.dicom,application/dicom,image/jpeg,image/png"
             onChange={onPickFile}
             className="mt-2 w-full rounded-xl border border-slate-600 bg-slate-900/70 p-3 text-sm"
           />
-
-          <div className="mt-5 space-y-3">
-            {!cameraOn ? (
-              <button
-                onClick={startCamera}
-                className="w-full rounded-xl bg-accent px-4 py-3 font-semibold text-slate-950 transition hover:brightness-110"
-              >
-                Start Webcam
-              </button>
-            ) : (
-              <>
-                <video ref={videoRef} autoPlay playsInline className="w-full rounded-xl border border-slate-700" />
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={captureFrame}
-                    className="rounded-xl bg-warning px-4 py-2 font-semibold text-slate-900"
-                  >
-                    Capture
-                  </button>
-                  <button
-                    onClick={stopCamera}
-                    className="rounded-xl border border-slate-500 px-4 py-2 font-semibold"
-                  >
-                    Stop
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
 
           <button
             onClick={runAnalysis}
@@ -237,6 +174,16 @@ export function DashboardPage(): JSX.Element {
           >
             {processing ? "Processing..." : "Run AI Analysis"}
           </button>
+
+          <label className="mt-4 flex items-center gap-2 text-sm text-slate-200">
+            <input
+              type="checkbox"
+              checked={showDebugGrid}
+              onChange={(event) => setShowDebugGrid(event.target.checked)}
+              className="h-4 w-4 rounded border-slate-500 bg-slate-900"
+            />
+            Show Debug Grid
+          </label>
 
           {processing && (
             <motion.div
@@ -334,7 +281,7 @@ export function DashboardPage(): JSX.Element {
             className="glass-panel rounded-2xl p-4"
           >
             <h3 className="mb-3 text-lg font-bold">Annotated X-ray</h3>
-            <XrayCanvas imageUrl={imageUrl} result={result} />
+            <XrayCanvas imageUrl={imageUrl} result={result} showDebugGrid={showDebugGrid} />
           </motion.div>
         </section>
       </div>
